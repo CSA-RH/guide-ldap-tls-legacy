@@ -1395,4 +1395,4 @@ The lab uses `db.vendor: dev-file` for simplicity. This is an in-memory/file dat
 
 ---
 
-_Lab built: June 2026 — OpenShift CRC 4.21 — api.crc.testing:6443_
+
