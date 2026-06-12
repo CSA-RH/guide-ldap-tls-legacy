@@ -9,26 +9,26 @@ The symptom is deceptively simple: users who were logging in just fine suddenly 
 ### What this lab demonstrates
 
 | Scenario | TLS | Cipher | OCP OAuth (Go 1.22+) | Keycloak (Java) |
-|----------|-----|--------|----------------------|-----------------|
-| Legacy LDAP — RSA Kx only | TLS 1.2 | `TLS_RSA_WITH_AES_256_GCM_SHA384` | **FAILS** — `Network Error: EOF` | Works fine |
-| Legacy LDAP — with ECDHE fix | TLS 1.2 | `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384` | **Works** | Works fine |
+|---|---|---|---|---|
+| Legacy LDAP — RSA Kx only | TLS 1.2 | TLS_RSA_WITH_AES_256_GCM_SHA384 | **FAILS** — Network Error: EOF | Works fine |
+| Legacy LDAP — with ECDHE fix | TLS 1.2 | TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 | **Works** | Works fine |
 | Modern LDAP — TLS 1.3 | TLS 1.3 | ECDHE only | **Works** | Works fine |
 
 The key insight: Keycloak uses Java's LDAP stack, which doesn't have Go's restriction, so the same broken LDAP server works fine when accessed through Keycloak. This opens up a useful workaround path when you can't touch the AD.
 
 ### Solutions covered
 
-- **Option A** — Enable ECDHE cipher suites on the LDAP/AD server → **Validated ✓**
-- **Option B** — Migrate to TLS 1.3 → **Validated ✓** (via openldap-modern)
-- **Option C** — Put Keycloak/RHBK in front as an OIDC broker → **Validated ✓**
+* **Option A** — Enable ECDHE cipher suites on the LDAP/AD server → **Validated ✓**
+* **Option B** — Migrate to TLS 1.3 → **Validated ✓** (via openldap-modern)
+* **Option C** — Put Keycloak/RHBK in front as an OIDC broker → **Validated ✓**
 
 ---
 
 ## Prerequisites
 
-- OpenShift CRC 4.15+ (this lab was built on CRC 4.21 — note that OCP 4.14 is **not** affected)
-- `oc` CLI installed and configured
-- cluster-admin access
+* OpenShift CRC 4.15+ (this lab was built on CRC 4.21 — note that OCP 4.14 is **not** affected)
+* `oc` CLI installed and configured
+* cluster-admin access
 
 ```bash
 oc login -u kubeadmin -p <password> https://api.crc.testing:6443 --insecure-skip-tls-verify
@@ -52,7 +52,7 @@ oc adm policy add-scc-to-user anyuid -z openldap-modern-sa -n legacy-auth
 
 Both LDAP servers share a common CA. This simplifies trust configuration later — you only need to register one CA with OCP OAuth and Keycloak.
 
-A note on certificate requirements: the server certificates **must** include `keyEncipherment` in the Key Usage extension. Without it, RSA key exchange cipher suites fail at the TLS handshake level regardless of what the server advertises. This is a common gotcha when generating certs manually.
+The server certificates **must** include `keyEncipherment` in the Key Usage extension. Without it, RSA key exchange cipher suites fail at the TLS handshake level regardless of what the server advertises. This is a common gotcha when generating certs manually.
 
 ```bash
 # Shared CA
@@ -254,7 +254,7 @@ oc logs -n legacy-auth deploy/openldap-legacy -f
 ### Populate legacy users
 
 ```bash
-oc exec -n legacy-auth deploy/openldap-legacy -- \
+oc exec -n legacy-auth deploy/openldap-legacy -c openldap -- \
   ldapadd -x -H ldap://localhost:389 \
   -D "cn=admin,dc=legacy,dc=local" -w "AdminPass123!" <<'EOF'
 dn: ou=users,dc=legacy,dc=local
@@ -263,53 +263,51 @@ ou: users
 
 dn: uid=bob_legacy,ou=users,dc=legacy,dc=local
 objectClass: inetOrgPerson
-objectClass: organizationalPerson
-objectClass: person
+objectClass: posixAccount
+objectClass: shadowAccount
 uid: bob_legacy
 cn: Bob Legacy
 sn: Legacy
-mail: bob@legacy.local
+givenName: Bob
+uidNumber: 10001
+gidNumber: 10001
+homeDirectory: /home/bob_legacy
+loginShell: /bin/bash
+mail: bob_legacy@legacy.local
 userPassword: Password123!
 
 dn: uid=carol_legacy,ou=users,dc=legacy,dc=local
 objectClass: inetOrgPerson
-objectClass: organizationalPerson
-objectClass: person
+objectClass: posixAccount
+objectClass: shadowAccount
 uid: carol_legacy
 cn: Carol Legacy
 sn: Legacy
-mail: carol@legacy.local
+givenName: Carol
+uidNumber: 10002
+gidNumber: 10002
+homeDirectory: /home/carol_legacy
+loginShell: /bin/bash
+mail: carol_legacy@legacy.local
 userPassword: Password123!
 EOF
 ```
 
+> **Note**: The script (`demo-script.sh`) uses `posixAccount` and `shadowAccount` objectClasses in addition to `inetOrgPerson`. If you populated manually with only `inetOrgPerson`, you may want to re-populate to match the script. This doesn't affect authentication but ensures consistency.
+
 ### Verify
 
 ```bash
-oc exec -n legacy-auth deploy/openldap-legacy -- \
+oc exec -n legacy-auth deploy/openldap-legacy -c openldap -- \
   ldapsearch -x -H ldap://localhost:389 \
   -D "cn=admin,dc=legacy,dc=local" -w "AdminPass123!" \
   -b "ou=users,dc=legacy,dc=local" uid cn
 ```
 
-Expected output:
-
-```
-# bob_legacy, users, legacy.local
-dn: uid=bob_legacy,ou=users,dc=legacy,dc=local
-uid: bob_legacy
-cn: Bob Legacy
-
-# carol_legacy, users, legacy.local
-dn: uid=carol_legacy,ou=users,dc=legacy,dc=local
-uid: carol_legacy
-cn: Carol Legacy
-```
-
 ### Confirm the cipher suite
 
 ```bash
-oc exec -n legacy-auth deploy/openldap-legacy -- \
+oc exec -n legacy-auth deploy/openldap-legacy -c openldap -- \
   openssl s_client -connect localhost:636 -tls1_2 </dev/null 2>&1 \
   | grep "Cipher is"
 ```
@@ -445,11 +443,11 @@ oc get is openldap-modern -n legacy-auth
 Expected output:
 
 ```
-NAME              IMAGE REPOSITORY                                                                TAGS     UPDATED
-openldap-modern   image-registry.openshift-image-registry.svc:5000/legacy-auth/openldap-modern   latest   <timestamp>
+NAME              IMAGE REPOSITORY                                                              TAGS     UPDATED
+openldap-modern   image-registry.openshift-image-registry.svc:5000/legacy-auth/openldap-modern  latest   <timestamp>
 ```
 
-> **⚠ Troubleshooting: `unknown database type "mdb"`**
+> **Troubleshooting: `unknown database type "mdb"`**
 >
 > If the pod logs show:
 > ```
@@ -458,7 +456,7 @@ openldap-modern   image-registry.openshift-image-registry.svc:5000/legacy-auth/o
 > ```
 > The `moduleload back_mdb` line is missing from the entrypoint's `slapd.conf`. In OpenLDAP 2.4.x (osixia) the MDB backend is statically compiled in, but in **2.5.x (Debian Bookworm) it's a loadable module** that must be explicitly declared.
 
-> **⚠ Troubleshooting: TLS init failed with `-u openldap`**
+> **Troubleshooting: TLS init failed with `-u openldap`**
 >
 > If slapd starts but port 636 doesn't respond and logs show:
 > ```
@@ -671,176 +669,11 @@ oc get pods -n openshift-authentication -w
 
 ---
 
-## Part 5 — Reproduce the Failure
+## Part 5 — Install and Configure Keycloak (RHBK)
 
-### 5.1 bob_modern (TLS 1.3) — should work
+Keycloak uses Java's LDAP client stack, which still supports RSA Key Exchange cipher suites — so it can talk to the broken LDAP server without issues. OCP then authenticates against Keycloak via OIDC, bypassing the Go TLS restriction entirely.
 
-```bash
-oc login -u bob_modern -p 'Password123!' \
-  https://api.crc.testing:6443 --insecure-skip-tls-verify
-```
-
-Expected:
-
-```
-Login successful.
-```
-
-### 5.2 bob_legacy (TLS 1.2 + RSA Kx) — should fail
-
-```bash
-oc login -u bob_legacy -p 'Password123!' \
-  https://api.crc.testing:6443 --insecure-skip-tls-verify
-```
-
-Expected — **this is the bug**:
-
-```
-Error from server (InternalError): Internal error occurred: unexpected response: 500
-```
-
-### 5.3 See the actual error in the OAuth server logs
-
-```bash
-oc login -u kubeadmin -p <password> https://api.crc.testing:6443 --insecure-skip-tls-verify
-oc logs -n openshift-authentication deploy/oauth-openshift --tail=5
-```
-
-Expected:
-
-```
-E0610 15:49:43.023059  1 basicauth.go:45] Error authenticating login "bob_legacy"
-  with provider "ldap-legacy": LDAP Result Code 200 "Network Error": EOF
-```
-
-`Network Error: EOF` means the TLS handshake failed silently — Go 1.22+ offered no cipher suites that the server could accept.
-
-### 5.4 Check User and Identity objects
-
-```bash
-oc get users
-oc get identities
-```
-
-Expected:
-
-```
-NAME         FULL NAME    IDENTITIES
-bob_modern   Bob Modern   ldap-modern:Ym9iX21vZGVybg
-
-NAME                         IDP NAME      USER NAME
-ldap-modern:Ym9iX21vZGVybg   ldap-modern   bob_modern
-```
-
-`bob_legacy` doesn't appear — the login failed before OCP could create any objects.
-
----
-
-## Part 6 — Fix A: Enable ECDHE on the Legacy LDAP
-
-The fix is straightforward: add `+ECDHE-RSA` and `+CURVE-ALL` to the GnuTLS priority string. The `+CURVE-ALL` part is easy to miss — without it, GnuTLS doesn't know which elliptic curves to use and ECDHE silently doesn't activate.
-
-### 6.1 Update the cipher suite
-
-```bash
-oc set env deploy/openldap-legacy -n legacy-auth \
-  LDAP_TLS_CIPHER_SUITE='NONE:+VERS-TLS1.2:+ECDHE-RSA:+RSA:+AES-128-GCM:+AES-256-GCM:+AES-128-CBC:+AES-256-CBC:+MAC-ALL:+SIGN-ALL:+CTYPE-X509:+COMP-ALL:+CURVE-ALL'
-```
-
-> If the pod fails after the rollout with "config directory is empty but not the database directory", the PVC needs to be cleaned before it can reinitialize:
-
-```bash
-oc scale deploy/openldap-legacy -n legacy-auth --replicas=0
-oc run ldap-cleanup -n legacy-auth --image=osixia/openldap:1.2.5 \
-  --restart=Never --rm -i \
-  --overrides='{
-    "spec": {
-      "containers": [{
-        "name": "ldap-cleanup",
-        "image": "osixia/openldap:1.2.5",
-        "command": ["sh", "-c", "rm -rf /var/lib/ldap/* && echo CLEANED"],
-        "volumeMounts": [{"name": "data", "mountPath": "/var/lib/ldap"}],
-        "securityContext": {"runAsUser": 0}
-      }],
-      "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": "openldap-legacy-data"}}],
-      "serviceAccountName": "openldap-legacy-sa"
-    }
-  }'
-oc scale deploy/openldap-legacy -n legacy-auth --replicas=1
-```
-
-After it comes back up, re-run the user population step from Part 2.
-
-### 6.2 Confirm the cipher suite changed
-
-```bash
-oc exec -n legacy-auth deploy/openldap-legacy -- \
-  openssl s_client -connect localhost:636 -tls1_2 </dev/null 2>&1 \
-  | grep "Cipher is"
-```
-
-Expected — **ECDHE is now active**:
-
-```
-New, TLSv1.2, Cipher is ECDHE-RSA-AES256-GCM-SHA384
-```
-
-### 6.3 bob_legacy should now log in
-
-```bash
-oc login -u bob_legacy -p 'Password123!' \
-  https://api.crc.testing:6443 --insecure-skip-tls-verify
-```
-
-Expected:
-
-```
-Login successful.
-```
-
-### 6.4 Verify Identity objects
-
-```bash
-oc login -u kubeadmin -p <password> https://api.crc.testing:6443 --insecure-skip-tls-verify
-oc get users
-oc get identities
-```
-
-Expected:
-
-```
-NAME           FULL NAME      IDENTITIES
-bob_legacy     Bob Legacy     ldap-legacy:Ym9iX2xlZ2FjeQ
-bob_modern     Bob Modern     ldap-modern:Ym9iX21vZGVybg
-
-NAME                           IDP NAME      USER NAME
-ldap-legacy:Ym9iX2xlZ2FjeQ     ldap-legacy   bob_legacy
-ldap-modern:Ym9iX21vZGVybg     ldap-modern   bob_modern
-```
-
-### Equivalent fix on Windows Active Directory
-
-On a Windows Server Domain Controller, enable the ECDHE cipher suites via PowerShell:
-
-```powershell
-# Check what's currently enabled
-Get-TlsCipherSuite | Where-Object { $_.Name -like "*ECDHE*RSA*" }
-
-# Enable ECDHE suites if missing
-Enable-TlsCipherSuite -Name "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
-Enable-TlsCipherSuite -Name "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
-
-# Verify
-Get-TlsCipherSuite | Select-Object -First 10
-```
-
----
-
-## Part 7 — Fix C: Keycloak as OIDC Broker
-
-This option doesn't require any changes to the Active Directory. Keycloak uses Java's LDAP client stack, which still supports RSA Key Exchange cipher suites — so it can talk to the broken LDAP server without issues. OCP then authenticates against Keycloak via OIDC, bypassing the Go TLS restriction entirely.
-
-### 7.1 Install RHBK
+### 5.1 Install the RHBK operator
 
 ```bash
 oc new-project keycloak
@@ -871,7 +704,7 @@ EOF
 oc get csv -n keycloak -w
 ```
 
-### 7.2 Deploy a Keycloak instance
+### 5.2 Deploy a Keycloak instance
 
 ```yaml
 # File: keycloak-instance.yaml
@@ -898,14 +731,16 @@ oc get keycloak keycloak -n keycloak -w
 # Wait for: Ready=True
 ```
 
-### 7.3 Get admin credentials
+> **Important**: The `dev-file` database is **ephemeral** — all Keycloak configuration (federations, clients, users synced from LDAP) is lost when the pod restarts. The demo script handles this by checking and recreating federations and the OIDC client idempotently at the start of each run (see `demo_check_keycloak` in the script).
+
+### 5.3 Get admin credentials
 
 ```bash
 oc get secret keycloak-initial-admin -n keycloak \
   -o go-template='{{.data.username | base64decode}} / {{.data.password | base64decode}}'
 ```
 
-### 7.4 A note on the Keycloak 26 admin console
+### 5.4 A note on the Keycloak 26 admin console
 
 > Keycloak 26 includes a third-party cookie check in the admin console. On first load, it renders a hidden iframe pointing to `/realms/master/protocol/openid-connect/3p-cookies/step1.html` and waits for a postMessage response. If your browser blocks third-party cookies — which most modern browsers do by default, and corporate-managed Chrome tends to enforce strictly — this check times out and you see a `somethingWentWrong` error before you even get to the login form.
 >
@@ -913,21 +748,19 @@ oc get secret keycloak-initial-admin -n keycloak \
 >
 > ```bash
 > oc exec -n keycloak keycloak-0 -- bash -c "\
-> mkdir -p /tmp/kc &&\
-> /opt/keycloak/bin/kcadm.sh config credentials \
->   --config /tmp/kc/cfg \
->   --server http://localhost:8080 \
->   --realm master \
->   --user <admin_user> \
->   --password <admin_pass> &&\
-> /opt/keycloak/bin/kcadm.sh <operation> --config /tmp/kc/cfg ..."
+>   mkdir -p /tmp/kc &&\
+>   /opt/keycloak/bin/kcadm.sh config credentials \
+>     --config /tmp/kc/cfg \
+>     --server http://localhost:8080 \
+>     --realm master \
+>     --user <admin_user> \
+>     --password <admin_pass> &&\
+>   /opt/keycloak/bin/kcadm.sh <operation> --config /tmp/kc/cfg ..."
 > ```
 >
-> This connects to Keycloak's loopback interface — no TLS, no cookies, no browser involved. It's also how you'd automate Keycloak configuration in a GitOps pipeline, so it's good practice anyway.
->
-> If you do need the UI, the options are: run Keycloak with `--spi-login-protocol-openid-connect-legacy-logout-redirect-uri=true`, or configure `SameSite=None; Secure` on the Route (requires proper HTTPS).
+> This connects to Keycloak's loopback interface — no TLS, no cookies, no browser involved.
 
-### 7.5 Configure LDAP federation
+### 5.5 Configure LDAP federations via kcadm.sh
 
 ```bash
 KC_ADMIN=temp-admin
@@ -955,7 +788,8 @@ mkdir -p /tmp/kc &&\
   -s 'config.usernameLDAPAttribute=[\"uid\"]' \
   -s 'config.rdnLDAPAttribute=[\"uid\"]' \
   -s 'config.uuidLDAPAttribute=[\"entryUUID\"]' \
-  -s 'config.userObjectClasses=[\"inetOrgPerson, organizationalPerson\"]' \
+  -s 'config.userObjectClasses=[\"inetOrgPerson\"]' \
+  -s 'config.searchScope=[\"1\"]' \
   -s 'config.editMode=[\"READ_ONLY\"]' \
   -s 'config.authType=[\"simple\"]' \
   -s 'config.enabled=[\"true\"]'"
@@ -981,76 +815,16 @@ oc exec -n keycloak keycloak-0 -- bash -c "\
   -s 'config.usernameLDAPAttribute=[\"uid\"]' \
   -s 'config.rdnLDAPAttribute=[\"uid\"]' \
   -s 'config.uuidLDAPAttribute=[\"entryUUID\"]' \
-  -s 'config.userObjectClasses=[\"inetOrgPerson, organizationalPerson\"]' \
+  -s 'config.userObjectClasses=[\"inetOrgPerson\"]' \
+  -s 'config.searchScope=[\"1\"]' \
   -s 'config.editMode=[\"READ_ONLY\"]' \
   -s 'config.authType=[\"simple\"]' \
   -s 'config.enabled=[\"true\"]'"
 ```
 
-> **Note**: Keycloak connects to LDAP on **port 389 (plaintext)** here, not LDAPS. Pod-to-pod traffic inside the cluster travels over the SDN and doesn't leave the node unencrypted. More importantly, it completely sidesteps the TLS cipher suite issue — which is exactly the point of this workaround.
+> **Note**: Keycloak connects to LDAP on **port 389 (plaintext)** here, not LDAPS. Pod-to-pod traffic inside the cluster travels over the SDN. More importantly, it completely sidesteps the TLS cipher suite issue — which is exactly the point of this workaround.
 
-### 7.6 Sync and verify users
-
-```bash
-oc exec -n keycloak keycloak-0 -- bash -c "\
-mkdir -p /tmp/kc &&\
-/opt/keycloak/bin/kcadm.sh config credentials \
-  --config /tmp/kc/cfg \
-  --server http://localhost:8080 \
-  --realm master \
-  --user $KC_ADMIN \
-  --password $KC_PASS &&\
-
-LEGACY_ID=\$(/opt/keycloak/bin/kcadm.sh get components \
-  --config /tmp/kc/cfg -r master \
-  -q type=org.keycloak.storage.UserStorageProvider \
-  --fields id,name 2>/dev/null | \
-  grep -B1 ldap-legacy | grep id | \
-  sed 's/.*: \"//;s/\".*//' ) &&\
-echo \"Federation ID: \$LEGACY_ID\" &&\
-
-/opt/keycloak/bin/kcadm.sh create \
-  \"user-storage/\$LEGACY_ID/sync?action=triggerFullSync\" \
-  --config /tmp/kc/cfg -r master &&\
-echo 'Sync complete' &&\
-
-/opt/keycloak/bin/kcadm.sh get 'users?username=carol_legacy&exact=true' \
-  --config /tmp/kc/cfg -r master \
-  --fields username,federationLink"
-```
-
-Expected output:
-
-```
-Federation ID: 5-QaBqtPTiygzW7LFHsThw
-Sync complete
-[ {
-  "username" : "carol_legacy",
-  "federationLink" : "5-QaBqtPTiygzW7LFHsThw"
-} ]
-```
-
-### 7.7 Verify carol_legacy can authenticate through Keycloak
-
-```bash
-oc exec -n keycloak keycloak-0 -- bash -c "\
-/opt/keycloak/bin/kcadm.sh config credentials \
-  --config /tmp/kc/test \
-  --server http://localhost:8080 \
-  --realm master \
-  --user carol_legacy \
-  --password 'Password123!'"
-```
-
-Expected:
-
-```
-Logging into http://localhost:8080 as user carol_legacy of realm master
-```
-
-carol_legacy can authenticate even though the LDAP server only offers RSA Kx ciphers — because Keycloak's Java LDAP stack doesn't have Go's restriction.
-
-### 7.8 Create an OIDC client for OCP
+### 5.6 Create the OIDC client for OCP
 
 ```bash
 oc exec -n keycloak keycloak-0 -- bash -c "\
@@ -1073,7 +847,9 @@ mkdir -p /tmp/kc &&\
   -s standardFlowEnabled=true"
 ```
 
-### 7.9 Add Keycloak as an OIDC identity provider in OCP
+`directAccessGrantsEnabled=true` enables the Resource Owner Password Credentials (ROPC) grant, which is what `oc login -u <user> -p <pass>` uses when going through an OIDC provider.
+
+### 5.7 Add Keycloak as an OIDC identity provider in OCP
 
 ```bash
 # Extract the CRC router CA — needed for OCP to trust Keycloak's HTTPS endpoint
@@ -1113,10 +889,86 @@ oc get pods -n openshift-authentication -w
 # Wait for oauth-openshift to recycle
 ```
 
-### 7.10 Test login through Keycloak
+---
+
+## Part 6 — Running the Demo
+
+The demo is automated by `demo-script.sh`. Source it and call the functions in order.
+
+### 6.1 Script overview
 
 ```bash
-oc login -u carol_legacy -p 'Password123!' \
+source demo-script.sh
+```
+
+| Function | What it does |
+|---|---|
+| `pre_demo` | Resets the environment: sets RSA-only cipher suite (broken), cleans PVC, restarts LDAP, repopulates users, recycles OAuth pods, ensures Keycloak has federations + OIDC client |
+| `demo_paso1_fallo` | **Step 1 — The failure.** Shows bob_modern succeeds (TLS 1.3) and bob_legacy fails (RSA Kx + Go 1.22). Displays OAuth logs with `Network Error: EOF` |
+| `demo_paso2_casoB` | **Step 2 — Case B: TLS 1.3.** Shows the modern server working as a reference for where TLS 1.3 solves the problem |
+| `demo_paso3_casoA` | **Step 3 — Case A: Enable ECDHE.** Adds `+ECDHE-RSA` and `+CURVE-ALL` to the legacy server's cipher suite. Restarts LDAP (PVC cleanup), repopulates users, recycles OAuth, and verifies bob_legacy can now authenticate |
+| `demo_paso4_casoC` | **Step 4 — Case C: Keycloak broker.** Reverts ldap-legacy to RSA-only (broken again). Shows that carol_legacy can authenticate via Keycloak (Java, no Go restriction) while direct OCP login fails. Prompts for browser-based login via the console |
+| `demo_resumen` | Displays all User and Identity objects created during the demo |
+| `demo_diag` | Quick diagnostic: pod status, service endpoints, cipher suites, LDAP search, OAuth logs |
+
+### 6.2 Configuration
+
+Edit the three variables at the top of the script before running:
+
+```bash
+OCP_API="https://api.crc.testing:6443"
+KUBEADMIN_PASS="H5r8u-U2gIe-INVpJ-UME4Q"
+KC_PASS="af9af5741acf4b9dbc0b880d94b7d2ea"
+```
+
+### 6.3 Demo flow
+
+```bash
+# 1. Prepare (run before the customer arrives)
+pre_demo
+
+# 2. Show the failure
+demo_paso1_fallo
+
+# 3. Show TLS 1.3 works (reference)
+demo_paso2_casoB
+
+# 4. Fix A — enable ECDHE on the legacy server
+demo_paso3_casoA
+
+# 5. Fix C — Keycloak as OIDC broker (no AD changes needed)
+demo_paso4_casoC
+
+# 6. Summary
+demo_resumen
+```
+
+Each step pauses for you to show the web console and/or explain what happened.
+
+### 6.4 Helper functions
+
+The script includes helper functions that handle the quirks of the lab environment:
+
+| Helper | Purpose |
+|---|---|
+| `_ldap_cleanup_and_restart` | Scales down openldap-legacy, runs a cleanup pod to `rm -rf /var/lib/ldap/*`, scales back up. Required because `osixia/openldap` refuses to start if the config `emptyDir` is empty but the data PVC has content from a previous run |
+| `_wait_for_slapd_tls` | Polls with `openssl s_client` until port 636 accepts connections. Pod `Running` != slapd ready — DH parameter generation can take 2-3 minutes under CRC emulation |
+| `_populate_legacy_users` | Creates the LDIF inside the pod and runs `ldapadd`. Includes a verification loop that waits for the users to be searchable |
+| `_refresh_oauth` | Deletes the OAuth server pods to force fresh LDAP connections. Go maintains persistent TCP connections; without this step, the OAuth server reuses stale connections from before the LDAP restart and gets `Network Error: EOF` or `No Such Object` |
+| `_verify_ldap_from_oauth` | Runs `openssl s_client` from inside the OAuth pod to verify TLS connectivity and the negotiated cipher suite |
+| `_clean_user_identities` | Deletes lab User and Identity objects without touching `developer` or `kubeadmin` |
+| `demo_check_keycloak` | Idempotently ensures Keycloak has both LDAP federations and the `openshift` OIDC client. Keycloak uses `dev-file` DB so everything is lost on pod restart |
+
+---
+
+## Demo Step 1 — Reproduce the Failure
+
+> Script function: `demo_paso1_fallo`
+
+### bob_modern (TLS 1.3) — should work
+
+```bash
+oc login -u bob_modern -p 'Password123!' \
   https://api.crc.testing:6443 --insecure-skip-tls-verify
 ```
 
@@ -1126,10 +978,310 @@ Expected:
 Login successful.
 ```
 
+### bob_legacy (TLS 1.2 + RSA Kx) — should fail
+
+```bash
+oc login -u bob_legacy -p 'Password123!' \
+  https://api.crc.testing:6443 --insecure-skip-tls-verify
+```
+
+Expected — **this is the bug**:
+
+```
+Error from server (InternalError): Internal error occurred: unexpected response: 500
+```
+
+### OAuth server logs
+
+```bash
+oc login -u kubeadmin -p <password> https://api.crc.testing:6443 --insecure-skip-tls-verify
+oc logs -n openshift-authentication deploy/oauth-openshift --tail=10 \
+  | grep -i -E "legacy|error|EOF|Network"
+```
+
+Expected:
+
+```
+E0610 15:49:43.023059  1 basicauth.go:45] Error authenticating login "bob_legacy"
+  with provider "ldap-legacy": LDAP Result Code 200 "Network Error": EOF
+```
+
+`Network Error: EOF` means the TLS handshake failed silently — Go 1.22+ offered no cipher suites that the server could accept.
+
+### Check User and Identity objects
+
+```bash
+oc get users
+oc get identities
+```
+
+Expected:
+
+```
+NAME         FULL NAME    IDENTITIES
+bob_modern   Bob Modern   ldap-modern:Ym9iX21vZGVybg
+
+NAME                         IDP NAME      USER NAME
+ldap-modern:Ym9iX21vZGVybg   ldap-modern   bob_modern
+```
+
+`bob_legacy` doesn't appear — the login failed before OCP could create any objects.
+
+---
+
+## Demo Step 2 — Case B: TLS 1.3 (Reference)
+
+> Script function: `demo_paso2_casoB`
+
+This step shows that the modern server (TLS 1.3) works without issues. It serves as a reference for where TLS 1.3 solves the problem entirely.
+
+```bash
+# Verify TLS 1.3 protocol
+oc exec -n legacy-auth deploy/openldap-modern -- \
+  openssl s_client -connect localhost:636 2>/dev/null | grep "Protocol"
+
+# bob_modern logs in
+oc login -u bob_modern -p 'Password123!' \
+  https://api.crc.testing:6443 --insecure-skip-tls-verify
+
+# Verify identity
+oc login -u kubeadmin -p <password> https://api.crc.testing:6443 --insecure-skip-tls-verify
+oc get identities | grep modern
+```
+
+---
+
+## Demo Step 3 — Fix A: Enable ECDHE on the Legacy Server
+
+> Script function: `demo_paso3_casoA`
+
+The fix is straightforward: add `+ECDHE-RSA` and `+CURVE-ALL` to the GnuTLS priority string. The `+CURVE-ALL` part is easy to miss — without it, GnuTLS doesn't know which elliptic curves to use and ECDHE silently doesn't activate.
+
+### Update the cipher suite
+
+```bash
+oc set env deploy/openldap-legacy -n legacy-auth \
+  LDAP_TLS_CIPHER_SUITE='NONE:+VERS-TLS1.2:+ECDHE-RSA:+RSA:+AES-128-GCM:+AES-256-GCM:+AES-128-CBC:+AES-256-CBC:+MAC-ALL:+SIGN-ALL:+CTYPE-X509:+COMP-ALL:+CURVE-ALL'
+```
+
+### Restart with PVC cleanup
+
+The `osixia/openldap` image has a safety check: if the config `emptyDir` is empty but the data PVC has content, slapd refuses to start ("config directory is empty but not the database directory"). The script handles this automatically via `_ldap_cleanup_and_restart`:
+
+```bash
+oc scale deploy/openldap-legacy -n legacy-auth --replicas=0
+
+# Clean the PVC with a temporary pod
+oc run ldap-cleanup -n legacy-auth --image=osixia/openldap:1.2.5 \
+  --restart=Never --rm -i \
+  --overrides='{
+    "spec": {
+      "containers": [{
+        "name": "ldap-cleanup",
+        "image": "osixia/openldap:1.2.5",
+        "command": ["sh", "-c", "rm -rf /var/lib/ldap/* && echo CLEANED"],
+        "volumeMounts": [{"name": "data", "mountPath": "/var/lib/ldap"}],
+        "securityContext": {"runAsUser": 0}
+      }],
+      "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": "openldap-legacy-data"}}],
+      "serviceAccountName": "openldap-legacy-sa"
+    }
+  }'
+
+oc scale deploy/openldap-legacy -n legacy-auth --replicas=1
+oc rollout status deploy/openldap-legacy -n legacy-auth --timeout=120s
+```
+
+After it comes back up, re-populate users and **recycle the OAuth pods** (the script does this via `_populate_legacy_users` and `_refresh_oauth`):
+
+```bash
+# Re-populate users (see Part 2)
+# ...
+
+# Force OAuth to establish fresh LDAP connections
+oc delete pods -n openshift-authentication -l app=oauth-openshift
+```
+
+> **Why recycle OAuth?** Go's HTTP/TLS stack maintains persistent TCP connections. After an LDAP pod restart, the OAuth server still holds the old connection. Without recycling, you get `Network Error: EOF` or `LDAP Result Code 32 "No Such Object"` even though the LDAP server is working correctly with the new cipher suite.
+
+### Confirm the cipher suite changed
+
+```bash
+oc exec -n legacy-auth deploy/openldap-legacy -c openldap -- \
+  openssl s_client -connect localhost:636 -tls1_2 </dev/null 2>&1 \
+  | grep "Cipher is"
+```
+
+Expected — **ECDHE is now active**:
+
+```
+New, TLSv1.2, Cipher is ECDHE-RSA-AES256-GCM-SHA384
+```
+
+### bob_legacy should now log in
+
+The script uses a retry loop (up to 5 attempts) because the OAuth server may take a few seconds to establish a working connection to the restarted LDAP:
+
+```bash
+oc login -u bob_legacy -p 'Password123!' \
+  https://api.crc.testing:6443 --insecure-skip-tls-verify
+```
+
+Expected:
+
+```
+Login successful.
+```
+
+### Verify Identity objects
+
 ```bash
 oc login -u kubeadmin -p <password> https://api.crc.testing:6443 --insecure-skip-tls-verify
 oc get users
 oc get identities
+```
+
+Expected:
+
+```
+NAME           FULL NAME      IDENTITIES
+bob_legacy     Bob Legacy     ldap-legacy:Ym9iX2xlZ2FjeQ
+bob_modern     Bob Modern     ldap-modern:Ym9iX21vZGVybg
+
+NAME                           IDP NAME      USER NAME
+ldap-legacy:Ym9iX2xlZ2FjeQ     ldap-legacy   bob_legacy
+ldap-modern:Ym9iX21vZGVybg     ldap-modern   bob_modern
+```
+
+### Equivalent fix on Windows Active Directory
+
+On a Windows Server Domain Controller, enable the ECDHE cipher suites via PowerShell:
+
+```powershell
+# Check what's currently enabled
+Get-TlsCipherSuite | Where-Object { $_.Name -like "*ECDHE*RSA*" }
+
+# Enable ECDHE suites if missing
+Enable-TlsCipherSuite -Name "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+Enable-TlsCipherSuite -Name "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+
+# Verify
+Get-TlsCipherSuite | Select-Object -First 10
+```
+
+---
+
+## Demo Step 4 — Fix C: Keycloak as OIDC Broker
+
+> Script function: `demo_paso4_casoC`
+
+This step demonstrates the Keycloak workaround for when you **can't modify the Active Directory**. The script first reverts `openldap-legacy` to the broken RSA-only cipher suite, then shows:
+
+1. OCP **cannot** authenticate directly against the legacy LDAP (same failure as Step 1)
+2. Keycloak (Java) **can** authenticate the same user via its LDAP federation
+3. The user can log into OCP through the `keycloak-broker` IDP in the web console
+
+### Revert to broken cipher suite
+
+```bash
+oc set env deploy/openldap-legacy -n legacy-auth \
+  LDAP_TLS_CIPHER_SUITE='NONE:+VERS-TLS1.2:+RSA:+AES-128-GCM:+AES-256-GCM:+AES-128-CBC:+AES-256-CBC:+MAC-ALL:+SIGN-ALL:+CTYPE-X509:+COMP-ALL'
+```
+
+Then PVC cleanup + restart + repopulate users + recycle OAuth (same procedure as Step 3, the script handles this automatically).
+
+### Verify Keycloak can reach the LDAP
+
+```bash
+# Ensure federations exist (the script does this via demo_check_keycloak)
+oc exec -n keycloak keycloak-0 -- bash -c '
+  mkdir -p /tmp/kc
+  /opt/keycloak/bin/kcadm.sh config credentials \
+    --config /tmp/kc/cfg \
+    --server http://localhost:8080 \
+    --realm master \
+    --user temp-admin \
+    --password <KC_PASS> 2>/dev/null
+  /opt/keycloak/bin/kcadm.sh get components \
+    --config /tmp/kc/cfg -r master \
+    -q type=org.keycloak.storage.UserStorageProvider \
+    --fields name,providerId'
+```
+
+### Sync users from legacy LDAP to Keycloak
+
+The script extracts the federation ID and triggers a full sync:
+
+```bash
+oc exec -n keycloak keycloak-0 -- bash -c '
+  /opt/keycloak/bin/kcadm.sh config credentials \
+    --config /tmp/kc/cfg \
+    --server http://localhost:8080 \
+    --realm master \
+    --user temp-admin \
+    --password <KC_PASS> 2>/dev/null
+
+  LEGACY_ID=$(/opt/keycloak/bin/kcadm.sh get components \
+    --config /tmp/kc/cfg -r master \
+    -q type=org.keycloak.storage.UserStorageProvider \
+    --fields id,name 2>/dev/null \
+    | grep -B1 "ldap-legacy" | head -1 | tr -d " \"," | sed "s/id://")
+
+  echo "Federation ID: $LEGACY_ID"
+  /opt/keycloak/bin/kcadm.sh create \
+    "user-storage/$LEGACY_ID/sync?action=triggerFullSync" \
+    --config /tmp/kc/cfg -r master'
+```
+
+### Verify carol_legacy authenticates through Keycloak
+
+```bash
+oc exec -n keycloak keycloak-0 -- bash -c '
+  /opt/keycloak/bin/kcadm.sh config credentials \
+    --config /tmp/kc/test \
+    --server http://localhost:8080 \
+    --realm master \
+    --user carol_legacy \
+    --password "Password123!"'
+```
+
+Expected:
+
+```
+Logging into http://localhost:8080 as user carol_legacy of realm master
+```
+
+carol_legacy can authenticate even though the LDAP server only offers RSA Kx ciphers — because Keycloak's Java LDAP stack doesn't have Go's restriction.
+
+### carol_legacy fails against OCP directly
+
+```bash
+oc login -u carol_legacy -p 'Password123!' \
+  https://api.crc.testing:6443 --insecure-skip-tls-verify
+```
+
+Expected — confirms OCP still can't talk to the broken LDAP:
+
+```
+Error from server (InternalError): Internal error occurred: unexpected response: 500
+```
+
+### Browser-based login via keycloak-broker
+
+At this point the script pauses and asks you to open the browser:
+
+1. Navigate to `https://console-openshift-console.apps-crc.testing`
+2. Select the **keycloak-broker** identity provider
+3. Log in as `carol_legacy` / `Password123!`
+
+The flow: Browser → OCP Console → OAuth → Keycloak (OIDC standard flow) → Keycloak LDAP federation (port 389, no TLS issue) → Success.
+
+### Verify Identity objects
+
+```bash
+oc login -u kubeadmin -p <password> https://api.crc.testing:6443 --insecure-skip-tls-verify
+oc get users
+oc get identities | grep -E "NAME|carol|keycloak"
 ```
 
 Expected:
@@ -1142,32 +1294,33 @@ NAME                                                   IDP NAME
 keycloak-broker:48ead577-6e98-40b4-af50-8a644880bead   keycloak-broker
 ```
 
-The full flow: `oc login` → OCP OAuth → Keycloak (OIDC Resource Owner Password grant) → Keycloak federates carol_legacy from the legacy LDAP (port 389) → success.
+The Identity shows `keycloak-broker` — not `ldap-legacy`. The AD was never touched.
 
 ---
 
-## Part 8 — Results Summary
+## Results Summary
+
+> Script function: `demo_resumen`
 
 ### Before the fix (RSA Kx only)
 
 | User | IDP | TLS | Result | Error |
-|------|-----|-----|--------|-------|
+|---|---|---|---|---|
 | bob_modern | ldap-modern | TLS 1.3 | **OK** | — |
-| bob_legacy | ldap-legacy | TLS 1.2 RSA Kx | **FAIL** | `Network Error: EOF` |
+| bob_legacy | ldap-legacy | TLS 1.2 RSA Kx | **FAIL** | Network Error: EOF |
 
 ### After Fix A (ECDHE enabled)
 
 | User | IDP | TLS | Cipher | Result |
-|------|-----|-----|--------|--------|
-| bob_legacy | ldap-legacy | TLS 1.2 | `ECDHE-RSA-AES256-GCM-SHA384` | **OK** |
-| carol_legacy | ldap-legacy | TLS 1.2 | `ECDHE-RSA-AES256-GCM-SHA384` | **OK** |
+|---|---|---|---|---|
+| bob_legacy | ldap-legacy | TLS 1.2 | ECDHE-RSA-AES256-GCM-SHA384 | **OK** |
 
-### After Fix C (Keycloak broker)
+### After Fix C (Keycloak broker, LDAP reverted to RSA-only)
 
 | User | IDP | Flow | Result |
-|------|-----|------|--------|
-| bob_legacy | keycloak-broker | OCP → Keycloak → LDAP(389) | **OK** |
+|---|---|---|---|
 | carol_legacy | keycloak-broker | OCP → Keycloak → LDAP(389) | **OK** |
+| carol_legacy | ldap-legacy (direct) | OCP → LDAP(636) | **FAIL** |
 
 ---
 
@@ -1175,24 +1328,24 @@ The full flow: `oc login` → OCP OAuth → Keycloak (OIDC Resource Owner Passwo
 
 ### Go 1.22 changelog (crypto/tls)
 
-> *The RSA key exchange cipher suites have been removed from the default list.*
+> _The RSA key exchange cipher suites have been removed from the default list._
 
 The dropped cipher suites:
 
 | IANA Name | GnuTLS token | Go 1.21 | Go 1.22+ |
-|-----------|-------------|---------|----------|
-| `TLS_RSA_WITH_AES_128_GCM_SHA256` | `+RSA:+AES-128-GCM` | Supported | **Dropped** |
-| `TLS_RSA_WITH_AES_256_GCM_SHA384` | `+RSA:+AES-256-GCM` | Supported | **Dropped** |
-| `TLS_RSA_WITH_AES_128_CBC_SHA256` | `+RSA:+AES-128-CBC` | Supported | **Dropped** |
-| `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256` | `+ECDHE-RSA:+AES-128-GCM` | Supported | **Still supported** |
-| `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384` | `+ECDHE-RSA:+AES-256-GCM` | Supported | **Still supported** |
+|---|---|---|---|
+| TLS_RSA_WITH_AES_128_GCM_SHA256 | +RSA:+AES-128-GCM | Supported | **Dropped** |
+| TLS_RSA_WITH_AES_256_GCM_SHA384 | +RSA:+AES-256-GCM | Supported | **Dropped** |
+| TLS_RSA_WITH_AES_128_CBC_SHA256 | +RSA:+AES-128-CBC | Supported | **Dropped** |
+| TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 | +ECDHE-RSA:+AES-128-GCM | Supported | **Still supported** |
+| TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 | +ECDHE-RSA:+AES-256-GCM | Supported | **Still supported** |
 
 The reason for the removal: RSA Key Exchange has no Perfect Forward Secrecy. If someone records encrypted traffic today and later obtains the server's private key, they can decrypt everything retroactively. ECDHE doesn't have this problem — each session generates a fresh key pair.
 
 ### Affected OpenShift versions
 
 | OCP Version | Go | RSA Kx | Affected |
-|-------------|-----|--------|----------|
+|---|---|---|---|
 | 4.13 | Go 1.20 | Supported | No |
 | 4.14 | Go 1.21 | Supported | **No** — Go 1.21 still includes RSA Kx by default |
 | **4.15** | **Go 1.22** | **Dropped** | **Yes** — first affected version |
@@ -1202,10 +1355,36 @@ If a customer is on OCP 4.14 and LDAP authentication works, the problem will sur
 
 ---
 
+## Known Issues and Workarounds
+
+### osixia/openldap PVC cleanup
+
+The `osixia/openldap:1.2.5` image has a safety check on startup: if the config directory (`emptyDir`, empty on every pod start) is empty but the data directory (PVC) has content from a previous run, slapd refuses to start with "config directory is empty but not the database directory". During the demo, the cipher suite changes via `oc set env` trigger a new rollout, and the new pod inherits the old PVC data.
+
+The script handles this by scaling down, running a cleanup pod to wipe `/var/lib/ldap/*`, then scaling back up. This forces `osixia/openldap` to re-initialize from scratch.
+
+### OAuth connection caching
+
+Go's `crypto/tls` maintains persistent TCP connections. After an LDAP pod restarts (new IP, new TLS session), the OAuth server may still hold stale connections from the old pod. Symptoms: `Network Error: EOF` or `LDAP Result Code 32 "No Such Object"` even though the LDAP server is working correctly.
+
+The script fixes this by deleting the OAuth pods (`_refresh_oauth`), forcing them to establish fresh connections.
+
+### DH parameter generation
+
+The `osixia/openldap` image generates Diffie-Hellman parameters on first TLS initialization. Under CRC/emulation this can take 2-3 minutes. During this time the pod is `Running` but port 636 doesn't respond. The script polls with `openssl s_client` until the TLS handshake succeeds (`_wait_for_slapd_tls`).
+
+### Keycloak dev-file DB
+
+The lab uses `db.vendor: dev-file` for simplicity. This is an in-memory/file database that's **lost when the pod restarts**. The script's `demo_check_keycloak` function handles this by checking for and recreating:
+- Both LDAP federations (ldap-legacy, ldap-modern)
+- The `openshift` OIDC client with `directAccessGrantsEnabled=true`
+
+---
+
 ## Recommendations
 
 | Option | Complexity | Requires AD changes | Lab validated |
-|--------|-----------|---------------------|---------------|
+|---|---|---|---|
 | **A** — Enable ECDHE in AD | Low | Yes | **Yes** |
 | **B** — Migrate AD to TLS 1.3 | Medium | Yes | **Yes** (openldap-modern) |
 | **C** — RHBK as OIDC broker | Medium-High | **No** | **Yes** |
@@ -1216,4 +1395,4 @@ If a customer is on OCP 4.14 and LDAP authentication works, the problem will sur
 
 ---
 
-*Lab built: June 2026 — OpenShift CRC 4.21 — api.crc.testing:6443*
+_Lab built: June 2026 — OpenShift CRC 4.21 — api.crc.testing:6443_
